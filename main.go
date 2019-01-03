@@ -197,18 +197,27 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-
 	githubToken = flag.String("githubToken", "", "Github Token")
-	if githubToken == nil {
+	slackToken = flag.String("slackToken", "", "Slack Token")
+
+	flag.Parse()
+	if githubToken == nil || *githubToken == "" {
 		log.Fatalln("Please provide githubToken")
 	}
+	log.Printf("github token = %v\n", *githubToken)
 
-	slackToken = flag.String("slackToken", "", "Slack Token")
-	if slackToken == nil {
+	if slackToken == nil || *slackToken == "" {
 		log.Fatalln("Please provide slackToken")
 	}
+	log.Printf("slack token = %v\n", *slackToken)
+	flag.Parse()
 
 	http.HandleFunc("/webhook-handler", webhookHandler)
 
-	log.Fatal(http.ListenAndServe(":8888", nil))
+	port := ":8888"
+	err := http.ListenAndServe(port, nil)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	log.Printf("PokeTheReviewer is running on port %v\n", port)
 }
