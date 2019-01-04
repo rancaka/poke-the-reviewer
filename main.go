@@ -30,12 +30,14 @@ func getBranch(notes string) (string, error) {
 }
 
 func getPRInfo(branchName string) (*PRInfo, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/tokopedia/ios-tokopedia/pulls?access_token=%v&head=tokopedia:%v", githubToken, branchName)
+	url := fmt.Sprintf("https://api.github.com/repos/tokopedia/ios-tokopedia/pulls?access_token=%v&head=tokopedia:%v", *githubToken, branchName)
 	res, err := http.Get(url)
 	if err != nil {
 		return nil, err
 	}
 	defer res.Body.Close()
+
+	log.Println(url)
 
 	var listOfPrInfo []*PRInfo
 	err = json.NewDecoder(res.Body).Decode(&listOfPrInfo)
@@ -55,8 +57,8 @@ func getReviewerEmails(prInfoBody string) []string {
 	return reg.FindAllString(prInfoBody, len(prInfoBody))
 }
 
-func getSlackUser(email string) (*User, error) {
-	url := fmt.Sprintf("https://slack.com/api/users.lookupByEmail?token=%v&email=%v", slackToken, email)
+func getSlackUser(email string) (*SlackUser, error) {
+	url := fmt.Sprintf("https://slack.com/api/users.lookupByEmail?token=%v&email=%v", *slackToken, email)
 	res, err := http.Get(url)
 	if err != nil {
 		return nil, err
@@ -69,52 +71,16 @@ func getSlackUser(email string) (*User, error) {
 		return nil, err
 	}
 
-	if !slackResponse.Ok || slackResponse.User == nil {
+	if !slackResponse.Ok || slackResponse.SlackUser == nil {
 		return nil, fmt.Errorf("user %v does not exist", email)
 	}
 
-	return slackResponse.User, nil
+	return slackResponse.SlackUser, nil
 }
 
-func generateAttachments(user User) []interface{} {
+func sendMessage(slackMessage SlackMessage) error {
 
-	attachments := []interface{}{
-		map[string]interface{}{
-			"fallback":    "Required plain-text summary of the attachment.",
-			"color":       "#2eb886",
-			"pretext":     "Optional text that appears above the attachment block",
-			"author_name": "Bobby Tables",
-			"author_link": "http://flickr.com/bobby/",
-			"author_icon": "http://flickr.com/icons/bobby.jpg",
-			"title":       "Slack API Documentation",
-			"title_link":  "https://api.slack.com/",
-			"text":        "Optional text that appears within the attachment",
-			"image_url":   "http://my-website.com/path/to/image.jpg",
-			"thumb_url":   "http://example.com/path/to/thumb.png",
-			"footer":      "Slack API",
-			"footer_icon": "https://platform.slack-edge.com/img/default_application_icon.png",
-			"ts":          123456789,
-		},
-	}
-
-	return attachments
-}
-
-func sendMessage(user User) error {
-
-	type message struct {
-		Channel     string        `json:"channel"`
-		Text        string        `json:"text"`
-		AsUser      bool          `json:"as_user"`
-		Attachments []interface{} `json:"attachments"`
-	}
-
-	m := message{
-		Channel:     user.ID,
-		AsUser:      true,
-		Attachments: generateAttachments(user),
-	}
-	b, err := json.Marshal(m)
+	b, err := json.Marshal(slackMessage)
 	if err != nil {
 		return err
 	}
@@ -124,7 +90,7 @@ func sendMessage(user User) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %v", slackToken))
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %v", *slackToken))
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -152,20 +118,16 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data := make(map[string]interface{})
-	err = json.Unmarshal(b, &data)
+	var webhookRequest WebhookRequest
+	err = json.Unmarshal(b, &webhookRequest)
 	if err != nil {
 		log.Println(err)
 		return
 	}
 
-	notes, ok := data["notes"].(string)
-	if !ok {
-		log.Println("error convert notes to string")
-		return
-	}
+	fmt.Printf("%+v\n", webhookRequest)
 
-	branch, err := getBranch(notes)
+	branch, err := getBranch(webhookRequest.AppVersion.Notes)
 	if err != nil {
 		log.Println(err)
 		return
@@ -177,22 +139,55 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	slackMessage := SlackMessage{
+		AsUser: true,
+		Attachments: []Attachment{
+			Attachment{
+				Fallback:   "Please kindly review / check my latest app.",
+				Pretext:    webhookRequest.Text,
+				Color:      "#2eb886",
+				AuthorName: prInfo.GithubUser.Login,
+				AuthorLink: prInfo.GithubUser.HTMLURL,
+				AuthorIcon: prInfo.GithubUser.AvatarURL,
+				Text:       "Please kindly review / check my latest app.",
+				Fields: []Field{
+					{
+						Title: "Version",
+						Value: webhookRequest.AppVersion.ShortVersion,
+						Short: true,
+					},
+					{
+						Title: "Branch",
+						Value: branch,
+						Short: true,
+					},
+				},
+				ImageURL:   "https://ecs7.tokopedia.net/blog-tokopedia-com/uploads/2015/08/tokopedia.png",
+				ThumbURL:   "https://ecs.tokopedia.com/img/footer/toped.png",
+				Footer:     "PokeTheReviewer",
+				FooterIcon: "https://ecs.tokopedia.com/img/footer/toped.png",
+			},
+		},
+	}
+
 	reviewerEmails := getReviewerEmails(prInfo.Body)
 	for _, email := range reviewerEmails {
+		go func(email string, slackMessage SlackMessage) {
+			slackUser, err := getSlackUser(email)
+			if err != nil {
+				log.Println(err)
+				return
+			}
 
-		user, err := getSlackUser(email)
-		if err != nil {
-			log.Println(err)
-			continue
-		}
+			slackMessage.Channel = slackUser.ID
+			err = sendMessage(slackMessage)
+			if err != nil {
+				log.Println(err)
+				return
+			}
 
-		err = sendMessage(*user)
-		if err != nil {
-			log.Println(err)
-			continue
-		}
-
-		log.Printf("message sent to: %v\n", user.RealName)
+			log.Printf("message sent to: %v\n", slackUser.RealName)
+		}(email, slackMessage)
 	}
 }
 
